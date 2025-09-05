@@ -1,17 +1,31 @@
 import pytest
 from copilot.text.tokenize import tokenize, normalize
 
-@pytest.mark.parametrize("text,expected", [
+# Cases that don't depend on accents
+BASIC_CASES = [
     ("Hello, world!", ["hello", "world"]),
     ("  Hello   \n  world\t", ["hello", "world"]),
     ("Warranty: 2-year (parts & labor).", ["warranty", "2", "year", "parts", "labor"]),
     ("co-operate can't re-enter", ["co", "operate", "can", "t", "re", "enter"]),
-    ("Información útil — versión 2.0!", ["información", "útil", "versión", "2", "0"]),
     ("", []),
     ("   ", []),
-])
-def test_tokenize_various(text, expected):
-    assert tokenize(text) == expected
+]
+
+def test_tokenize_various_preserve_accents_default():
+    # Default behavior should preserve accents (removeAccents=False)
+    for text, expected in BASIC_CASES:
+        assert tokenize(text) == expected
+
+def test_tokenize_spanish_preserve_vs_strip():
+    # This case checks both behaviors on an accented string
+    text = "Información útil — versión 2.0!"
+    expected_keep = ["información", "útil", "versión", "2", "0"]
+    expected_strip = ["informacion", "util", "version", "2", "0"]
+
+    # Default path: keep accents
+    assert tokenize(text) == expected_keep
+    # Explicit strip: remove accents
+    assert normalize(text, removeAccents=True).split() == expected_strip
 
 def test_normalize_idempotent():
     s = "Hello—World!!  Co-operate, please…"

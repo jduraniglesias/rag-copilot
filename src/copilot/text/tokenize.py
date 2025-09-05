@@ -1,8 +1,8 @@
 import unicodedata
-import re
+import regex as re
 from typing import List
 
-def normalize(text: str, *, removeAccents: bool = True, keepApostrophes: bool = False):
+def normalize(text: str, *, removeAccents: bool = False, keepApostrophes: bool = False):
     text = unicodedata.normalize("NFKC", text).casefold()
     
     # normalize quotes
@@ -15,10 +15,10 @@ def normalize(text: str, *, removeAccents: bool = True, keepApostrophes: bool = 
         text = unicodedata.normalize("NFKD", text)
         text = "".join(c for c in text if not unicodedata.combining(c))
 
-    if keepApostrophes:
+    if not keepApostrophes:
         text = text.replace("'", " ")
     
-    text = re.sub(r"[^0-9a-z\s]", " ", text)
+    text = re.sub(r"[^\p{L}\p{N}\s]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 def tokenize(cleanText: str) -> List[str]:
