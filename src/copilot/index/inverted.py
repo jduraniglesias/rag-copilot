@@ -1,9 +1,8 @@
 from typing import List, Dict, Tuple
 from copilot.text.tokenize import tokenize
 
-# Essentially im looping thru the chunks list,
-# for each chunk tokenize the words,
-# then loop thru the words and build the postings list
+# building inverted index for bm25 to use
+# inverted index maps tokens (words) to a specific chunk where it's at.
 
 def build_index(chunks: List[Dict]) -> Dict:
     postings: Dict[str, List[Tuple[int, int]]] = {}
@@ -41,9 +40,6 @@ def build_index(chunks: List[Dict]) -> Dict:
     }
     return built_index
 
-# Output dict must include:
-# "postings": Dict[str, List[Tuple[int, int]]] → term → list of (chunk_id, tf)
-# "doc_len": List[int] → token count per chunk (using your tokenize)
-# "avgdl": float → average of doc_len
-# "num_chunks": int → number of chunks
-# "chunks": the original chunks (so BM25 can fetch metadata)
+# Essentially im looping thru the chunks list,
+# for each chunk tokenize the words,
+# then loop thru the words and build the postings list
