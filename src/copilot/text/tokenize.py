@@ -21,5 +21,5 @@ def normalize(text: str, *, removeAccents: bool = False, keepApostrophes: bool =
     text = re.sub(r"[^\p{L}\p{N}\s]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
-def tokenize(cleanText: str) -> List[str]:
-    return normalize(cleanText).split()
+def tokenize(clean_text: str) -> List[str]:
+    return normalize(clean_text).split()
