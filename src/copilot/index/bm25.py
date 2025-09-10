@@ -40,6 +40,7 @@ class BM25Index:
                         sum += t_score
         return sum
 
+    # takes in query, scores all candidate chunks with bm25 and returns the top k scoring chunks
     def search(self, query: str, k: int = 10) -> List[tuple[int, float]]:
         query_tokens = tokenize(query)
         candidates: set[int] = set()
