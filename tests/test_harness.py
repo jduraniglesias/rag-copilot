@@ -77,3 +77,5 @@ def test_evaluate_qa_baseline_top1_chunk():
     # Copying the whole chunk won't exactly match the gold answers, but F1 should be > 0
     assert 0.0 <= m["em"] <= 1.0
     assert m["f1"] > 0.0
+
+    

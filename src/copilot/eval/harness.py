@@ -3,6 +3,8 @@ import math
 from typing import List, Dict, Tuple
 from copilot.eval.qa_metrics import exact_match, token_f1
 from copilot.eval.rank_metrics import ndcg_at_k
+from collections import Counter
+from copilot.text.tokenize import tokenize
 
 REQUIRED_KEYS = ("id", "question", "answer", "doc_id")
 
@@ -39,23 +41,46 @@ def relevant_chunk_ids_by_doc(index: dict, doc_id: str) -> List[int]:
 
 def labels_for_results(results: List[Tuple[int, float]], relevant_ids: List[int], k: int) -> List[float]:
     """Given search results [(chunk_id, score), ...], return length-k relevance labels (1.0 or 0.0)."""
-    labels = List[float] = [0.0] * k
+    labels: List[float] = [0.0] * k
     rel_ids = set(relevant_ids)
     for i in range(len(results)):
         if results[i][0] in rel_ids:
             labels[i] = 1.0
     return labels
 
-def rel_chunk_ids(bm25, doc_id):
-    return [i for i, ch in enumerate(bm25.chunks) if ch["meta"]["doc_id"] == doc_id] 
+def rel_chunk_ids_by_span_tokens(
+    bm25, doc_id: str, answer: str, fallback_to_doc: bool = True
+):
+    """
+    Span-level (token-based): chunk is relevant if it contains at least the
+    token multiset of the gold answer (case-insensitive, punctuation-robust).
+    """
+    gold_toks = tokenize(answer or "")
+    if not gold_toks:
+        # Empty/invalid gold → optionally fall back immediately
+        return [i for i, ch in enumerate(bm25.chunks) if ch["meta"]["doc_id"] == doc_id] if fallback_to_doc else []
 
+    gold_cnt = Counter(gold_toks)
+    rel = []
+    for i, ch in enumerate(bm25.chunks):
+        if ch["meta"]["doc_id"] != doc_id:
+            continue
+        ct = Counter(tokenize(ch["text"]))
+        if all(ct[t] >= c for t, c in gold_cnt.items()):
+            rel.append(i)
+
+    if not rel and fallback_to_doc:
+        rel = [i for i, ch in enumerate(bm25.chunks) if ch["meta"]["doc_id"] == doc_id]
+    return rel
+
+# evaluates how well the retriever ranks the correct chunks
 def evaluate_retrieval(bm25, gold_items: List[Dict], k: int = 5) -> Dict[str, float]:
     """
     For each gold item:
-      - run bm25.search(question, k)
-      - build labels with labels_for_results(...)
-      - compute NDCG@k and Recall@k (recall = 1 if any label==1 else 0)
-    Return averages: {'ndcg@k': float, 'recall@k': float, 'hit_rate@1': float}
+      - runs bm25.search(question, k)
+      - builds labels with labels_for_results(...)
+      - computes NDCG@k and Recall@k (recall = 1 if any label==1 else 0)
+    Returns averages: {'ndcg@k': float, 'recall@k': float, 'hit_rate@1': float}
     """
     avgs: Dict[str, float] = {}
     recall_total = []
@@ -64,7 +89,7 @@ def evaluate_retrieval(bm25, gold_items: List[Dict], k: int = 5) -> Dict[str, fl
 
     for gold_item in gold_items:
         results = bm25.search(gold_item["question"], k)
-        rel_ids = rel_chunk_ids(bm25, gold_item["doc_id"])
+        rel_ids = rel_chunk_ids_by_span_tokens(bm25, gold_item["doc_id"], gold_item["answer"])
         labels = labels_for_results(results, rel_ids, k)
         
         hit_rate_total.append(1.0 if labels and labels[0] > 0.0 else 0.0)
@@ -79,7 +104,7 @@ def evaluate_retrieval(bm25, gold_items: List[Dict], k: int = 5) -> Dict[str, fl
     
     return avgs
 
-
+# gives a baseline, if top chunk returned, how good is this answer
 def evaluate_qa_baseline(bm25, gold_items: List[Dict], k: int = 1) -> Dict[str, float]:
     """
     Very crude QA baseline:
@@ -93,7 +118,7 @@ def evaluate_qa_baseline(bm25, gold_items: List[Dict], k: int = 1) -> Dict[str, 
         results = bm25.search(gold_item["question"], k)
         pred = ""
         if len(results) > 0:
-            top_cid, top_score = results[0]
+            top_cid = results[0][0]
             top_chunk = bm25.chunks[top_cid]
             pred = top_chunk["text"]
         else:

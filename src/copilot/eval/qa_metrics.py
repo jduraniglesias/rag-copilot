@@ -6,11 +6,13 @@ from collections import Counter
 def normalize_answer(s: str) -> str:
     return " ".join(tokenize(s))
 
+# check for exact match
 def exact_match(pred, gold) -> int:
     if normalize_answer(pred) == normalize_answer(gold):
         return 1
     return 0
 
+# calculate the f1 score of token
 def token_f1(pred, gold) -> float:
     pred_tokens = tokenize(pred)
     gold_tokens = tokenize(gold)
@@ -25,5 +27,7 @@ def token_f1(pred, gold) -> float:
     overlap = sum((pred_counter & gold_counter).values())
     precision = overlap / sum(pred_counter.values())
     recall = overlap / sum(gold_counter.values())
+    if (precision + recall) == 0:
+        return 0.0
     return 2 * precision * recall / (precision + recall)
 
