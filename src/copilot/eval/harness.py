@@ -1,6 +1,6 @@
 import json
 import math
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Callable
 from copilot.eval.qa_metrics import exact_match, token_f1
 from copilot.eval.rank_metrics import ndcg_at_k, precision_at_k, mrr_at_k
 from collections import Counter
@@ -135,3 +135,37 @@ def evaluate_qa_baseline(bm25, gold_items: List[Dict], k: int = 1) -> Dict[str, 
     
     return {"em": sum(em_total) / len(gold_items), "f1": sum(f1_total) / len(gold_items)}
     # TO:DO review code of this eval_qa function
+
+def evaluate_qa_with_answerer(
+    bm25,
+    gold_items: List[Dict],
+    k_retrieval: int = 5,
+    k_ctx: int = 3,
+    answer_fn: Callable[[str, List[str], List[Dict]], Tuple[str, float]] = None,
+) -> Dict[str, float]:
+    """
+    1) Retrieve top-k_retrieval chunks.
+    2) Build a small context of top k_ctx chunk texts.
+    3) Call your answerer to produce a short string.
+    4) Compute EM/F1 vs gold answer. Return averages.
+    """
+    assert answer_fn is not None, "answer_fn required"
+    ems, f1s = [], []
+    for item in gold_items:
+        q = item["question"]
+        results = bm25.search(q, k=k_retrieval)
+        if not results:
+            ems.append(0.0); f1s.append(0.0); continue
+        # Context: top k_ctx passages (+ optional meta)
+        ctx_ids = [cid for cid, _ in results[:k_ctx]]
+        passages = [bm25.chunks[cid]["text"] for cid in ctx_ids]
+        metas = [bm25.chunks[cid]["meta"] for cid in ctx_ids]
+
+        pred, _conf = answer_fn(q, passages, metas)
+        gold = item["answer"]
+        ems.append(exact_match(pred, gold))
+        f1s.append(token_f1(pred, gold))
+    return {
+        "em": sum(ems)/len(ems) if ems else 0.0,
+        "f1": sum(f1s)/len(f1s) if f1s else 0.0,
+    }

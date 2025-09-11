@@ -6,6 +6,8 @@ from typing import List, Dict, Tuple
 from copilot.text.chunk import chunk_text
 from copilot.index.inverted import build_index
 from copilot.index.bm25 import BM25Index
+from copilot.qa.answering import answer as answer_short
+from copilot.eval.harness import evaluate_qa_with_answerer
 
 # Evaluation harness & metrics
 from copilot.eval.harness import (
@@ -109,19 +111,34 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     (NDCG@k / Recall@k / HitRate@1, plus EM/F1 for top-1 chunk-as-answer.)
     """
     bm25 = ensure_bm25_index(args.documents, size=args.size, overlap=args.overlap)
+
     gold_path = Path(args.gold)
     if not gold_path.exists():
         raise FileNotFoundError(f"Gold file not found: {gold_path}")
 
     gold_items = load_gold_jsonl(str(gold_path))
 
-    # Retrieval metrics (ranking quality)
+    # 1) Retrieval metrics (ranking quality)
     ret = evaluate_retrieval(bm25, gold_items, k=args.k)
     _print_metrics_table(f"Retrieval (BM25) @k={args.k}", ret)
 
-    # Crude QA baseline: take top-1 chunk text as the answer
-    qa = evaluate_qa_baseline(bm25, gold_items, k=1)
-    _print_metrics_table("QA baseline (top-1 chunk text)", qa)
+    # 2) QA metrics (short-answer quality)
+    if args.qa == "baseline":
+        qa = evaluate_qa_baseline(bm25, gold_items, k=1)
+        _print_metrics_table("QA baseline (top-1 chunk text)", qa)
+    else:
+        # Import here or at the top of the file—either is fine.
+        from copilot.qa.answering import answer as answer_short
+        from copilot.eval.harness import evaluate_qa_with_answerer
+
+        qa2 = evaluate_qa_with_answerer(
+            bm25,
+            gold_items,
+            k_retrieval=args.k,   # how many to retrieve before building the context
+            k_ctx=args.k_ctx,     # how many top passages to pass to the answerer
+            answer_fn=answer_short,
+        )
+        _print_metrics_table("QA (answerer)", qa2)
 
 # -----------------------
 # Main / argparse wiring
@@ -160,6 +177,19 @@ def main():
     p_eval.add_argument("--gold", type=str, default="data/qa_gold.jsonl",
                         help="Path to gold JSONL file (default: data/qa_gold.jsonl)")
     p_eval.add_argument("--k", type=int, default=5, help="Top-k for retrieval metrics (default: 5)")
+    p_eval.add_argument(
+        "--qa",
+        type=str,
+        choices=["baseline", "answerer"],
+        default="baseline",
+        help="QA scoring mode: 'baseline' uses top-1 chunk text; 'answerer' uses your extractor."
+    )
+    p_eval.add_argument(
+        "--k-ctx",
+        type=int,
+        default=3,
+        help="How many top chunks to pass to the answerer context."
+    )
     p_eval.set_defaults(func=cmd_evaluate)
 
     args = parser.parse_args()
