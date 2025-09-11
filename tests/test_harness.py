@@ -78,4 +78,18 @@ def test_evaluate_qa_baseline_top1_chunk():
     assert 0.0 <= m["em"] <= 1.0
     assert m["f1"] > 0.0
 
-    
+def test_evaluate_retrieval_includes_precision_and_mrr():
+    chunks = [
+        _mk_chunk("The warranty period is 30 days.", "warranty.txt"),
+        _mk_chunk("Return window requires proof of purchase.", "returns.txt"),
+        _mk_chunk("This is unrelated banana text.", "misc.txt"),
+    ]
+    bm = BM25Index(build_index(chunks))
+    gold = [
+        {"id":"q1","question":"What is the warranty period?","answer":"30 days","doc_id":"warranty.txt"},
+        {"id":"q2","question":"What is needed to return an item?","answer":"Proof of purchase","doc_id":"returns.txt"},
+    ]
+    metrics = evaluate_retrieval(bm, gold, k=3)
+    assert "precision@3" in metrics and 0.0 <= metrics["precision@3"] <= 1.0
+    assert "mrr@3" in metrics and 0.0 <= metrics["mrr@3"] <= 1.0
+

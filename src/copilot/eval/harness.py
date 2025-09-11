@@ -2,7 +2,7 @@ import json
 import math
 from typing import List, Dict, Tuple
 from copilot.eval.qa_metrics import exact_match, token_f1
-from copilot.eval.rank_metrics import ndcg_at_k
+from copilot.eval.rank_metrics import ndcg_at_k, precision_at_k, mrr_at_k
 from collections import Counter
 from copilot.text.tokenize import tokenize
 
@@ -80,12 +80,13 @@ def evaluate_retrieval(bm25, gold_items: List[Dict], k: int = 5) -> Dict[str, fl
       - runs bm25.search(question, k)
       - builds labels with labels_for_results(...)
       - computes NDCG@k and Recall@k (recall = 1 if any label==1 else 0)
-    Returns averages: {'ndcg@k': float, 'recall@k': float, 'hit_rate@1': float}
     """
     avgs: Dict[str, float] = {}
     recall_total = []
     ndcg_total = []
     hit_rate_total = []
+    precision_total = []
+    mrr_total = []
 
     for gold_item in gold_items:
         results = bm25.search(gold_item["question"], k)
@@ -97,11 +98,17 @@ def evaluate_retrieval(bm25, gold_items: List[Dict], k: int = 5) -> Dict[str, fl
         recall_total.append(1.0 if any(labels) else 0.0)
         
         ndcg_total.append(ndcg_at_k(labels, k))
+
+        precision_total.append(precision_at_k(labels, k))
+
+        mrr_total.append(mrr_at_k(labels, k))
     
     avgs[f"ndcg@{k}"] = (sum(ndcg_total) / max(1, len(ndcg_total)))
     avgs[f"recall@{k}"] = (sum(recall_total) / max(1, len(recall_total)))
     avgs["hit_rate@1"] = (sum(hit_rate_total) / max(1, len(hit_rate_total)))
-    
+    avgs[f"precision@{k}"] = (sum(precision_total) / max(1, len(precision_total)))
+    avgs[f"mrr@{k}"] = (sum(mrr_total) / max(1, len(mrr_total)))
+
     return avgs
 
 # gives a baseline, if top chunk returned, how good is this answer

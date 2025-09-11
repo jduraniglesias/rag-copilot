@@ -1,2 +1,36 @@
-{"question":"What is the warranty period?","gold_doc_id":"warranty.txt","answer_span":[23,30],"answers":["2 years","two years"]}
-{"question":"What is the returns window?","gold_doc_id":"returns.txt","answer_span":[28,35],"answers":["30 days","thirty days"]}
+{"id":"w1","question":"What is the warranty period?","answer":"30 days","answer_contains":"30 days","doc_id":"warranty.txt"}
+{"id":"w1p1","question":"How long does the standard warranty last?","answer":"30 days","answer_contains":"30 days","doc_id":"warranty.txt"}
+{"id":"w1p2","question":"What is the length of the warranty from purchase?","answer":"30 days","answer_contains":"30 days","doc_id":"warranty.txt"}
+
+{"id":"w2","question":"When does the warranty start?","answer":"delivery date","answer_contains":"delivery date","doc_id":"warranty.txt"}
+{"id":"w2p1","question":"What date does the warranty begin?","answer":"delivery date","answer_contains":"delivery date","doc_id":"warranty.txt"}
+
+{"id":"w3","question":"What does the warranty cover?","answer":"defects in materials and workmanship","answer_contains":"defects in materials and workmanship","doc_id":"warranty.txt"}
+{"id":"w3p1","question":"Which issues are covered by the warranty?","answer":"defects in materials and workmanship","answer_contains":"defects in materials and workmanship","doc_id":"warranty.txt"}
+
+{"id":"w4","question":"Is the warranty transferable?","answer":"non-transferable","answer_contains":"non-transferable","doc_id":"warranty.txt"}
+
+{"id":"w5","question":"Who pays shipping for warranty returns?","answer":"customer pays return shipping","answer_contains":"customer pays return shipping","doc_id":"warranty.txt"}
+
+{"id":"w6","question":"Are accidental damages covered by the warranty?","answer":"accidental damage is not covered","answer_contains":"accidental damage is not covered","doc_id":"warranty.txt"}
+{"id":"w6p1","question":"Does the warranty include accidental damage?","answer":"accidental damage is not covered","answer_contains":"accidental damage is not covered","doc_id":"warranty.txt"}
+
+{"id":"r1","question":"What is the return window?","answer":"30 days","answer_contains":"30 days","doc_id":"returns.txt"}
+{"id":"r1p1","question":"How many days do I have to return an item?","answer":"30 days","answer_contains":"30 days","doc_id":"returns.txt"}
+
+{"id":"r2","question":"What is required to process a return?","answer":"proof of purchase","answer_contains":"proof of purchase","doc_id":"returns.txt"}
+{"id":"r2p1","question":"What do I need to show to return a product?","answer":"proof of purchase","answer_contains":"proof of purchase","doc_id":"returns.txt"}
+
+{"id":"r3","question":"Do opened items incur a fee?","answer":"15% restocking fee","answer_contains":"15% restocking fee","doc_id":"returns.txt"}
+{"id":"r3p1","question":"Is there a restocking fee for opened items?","answer":"15% restocking fee","answer_contains":"15% restocking fee","doc_id":"returns.txt"}
+
+{"id":"r4","question":"How long do refunds take after inspection?","answer":"5-10 business days","answer_contains":"5-10 business days","doc_id":"returns.txt"}
+{"id":"r4p1","question":"When will I see my refund?","answer":"5-10 business days","answer_contains":"5-10 business days","doc_id":"returns.txt"}
+
+{"id":"r5","question":"Who pays return shipping for non-defective items?","answer":"customer is responsible for return shipping","answer_contains":"customer is responsible for return shipping","doc_id":"returns.txt"}
+{"id":"r5p1","question":"Do I have to pay for return shipping?","answer":"customer is responsible for return shipping","answer_contains":"customer is responsible for return shipping","doc_id":"returns.txt"}
+
+{"id":"r6","question":"Are gift cards returnable?","answer":"No, gift cards are final sale","answer_contains":"gift cards are final sale","doc_id":"returns.txt"}
+{"id":"r6p1","question":"Can I return a gift card?","answer":"No, gift cards are final sale","answer_contains":"gift cards are final sale","doc_id":"returns.txt"}
+
+{"id":"r7","question":"Are exchanges allowed?","answer":"Exchanges are allowed within 30 days","answer_contains":"exchanges within 30 days","doc_id":"returns.txt"}
