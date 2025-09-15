@@ -1,0 +1,18 @@
+0) Run before to enable CLI:
+$env:PYTHONPATH = (Resolve-Path .\src)
+
+1) Rebuild BM25 only
+python -m copilot.cli index --documents data/documents
+
+2)  Rebuild both BM25 + Dense
+python -m copilot.cli index --documents data/documents --dense
+
+3) Ask with different retrievers
+python -m copilot.cli ask "How long do I have to send it back?" --retriever bm25
+python -m copilot.cli ask "How long do I have to send it back?" --retriever dense
+python -m copilot.cli ask "How long do I have to send it back?" --retriever hybrid --hybrid-mode rrf
+python -m copilot.cli ask "How long do I have to send it back?" --retriever hybrid --hybrid-mode minmax --alpha 0.6
+
+4) Evaluate one vs. all
+python -m copilot.cli evaluate --retriever bm25 --qa answerer --k 5 --k-ctx 3
+python -m copilot.cli evaluate --retriever all  --qa answerer --k 5 --k-ctx 3

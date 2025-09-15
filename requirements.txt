@@ -1,3 +1,4 @@
 pytest
 tdm
 regex
+sentence-transformers

@@ -34,3 +34,5 @@
 {"id":"r6p1","question":"Can I return a gift card?","answer":"No, gift cards are final sale","answer_contains":"gift cards are final sale","doc_id":"returns.txt"}
 
 {"id":"r7","question":"Are exchanges allowed?","answer":"Exchanges are allowed within 30 days","answer_contains":"exchanges within 30 days","doc_id":"returns.txt"}
+
+{"id":"r8","question":"How long after delivery can I exchange an item?","answer":"30 days","doc_id":"returns.txt"}

@@ -1,4 +1,5 @@
 import json
+import time
 import math
 from typing import List, Dict, Tuple, Callable
 from copilot.eval.qa_metrics import exact_match, token_f1
@@ -169,3 +170,98 @@ def evaluate_qa_with_answerer(
         "em": sum(ems)/len(ems) if ems else 0.0,
         "f1": sum(f1s)/len(f1s) if f1s else 0.0,
     }
+
+def _percentile(values, pct: float) -> float:
+    if not values:
+        return 0.0
+    xs = sorted(values)
+    if pct <= 0: return xs[0]
+    if pct >= 100: return xs[-1]
+    k = (pct / 100.0) * (len(xs) - 1)
+    lo = math.floor(k); hi = math.ceil(k)
+    if lo == hi:
+        return float(xs[int(k)])
+    frac = k - lo
+    return float(xs[lo] + (xs[hi] - xs[lo]) * frac)
+
+def evaluate_suite(
+    retriever,                   # any object with .search(query, k) and .chunks
+    gold_items: List[Dict],
+    k_ndcg: int = 10,            # for NDCG
+    k_recall: int = 3,           # for Recall@3 and Hit@1
+    k_ctx: int = 3,              # how many passages to send to answerer
+    answer_fn: Callable[[str, List[str], List[Dict]], Tuple[str, float]] | None = None,
+) -> Dict[str, float]:
+    """
+    Runs retrieval once per gold, computes:
+      - NDCG@k_ndcg, Recall@k_recall, Hit@1
+      - Optional EM/F1 via answer_fn on top-k_ctx passages
+      - Latencies:
+         * search_p50_ms / search_p95_ms (retriever.search only)
+         * full_p50_ms / full_p95_ms (retrieval + context + answerer, if answer_fn given)
+    Returns a flat dict of averages and latency percentiles.
+    """
+    ndcgs, recalls, hits = [], [], []
+    ems, f1s = [], []
+    search_ms_all, full_ms_all = [], []
+
+    k_max = max(k_ndcg, k_recall, k_ctx)
+
+    for item in gold_items:
+        q = item["question"]
+        doc_id = item["doc_id"]
+        gold_ans = item["answer"]
+
+        # ---- time retrieval only
+        t0 = time.perf_counter()
+        results = retriever.search(q, k=k_max)
+        t1 = time.perf_counter()
+        search_ms_all.append((t1 - t0) * 1000.0)
+
+        # span-level relevant chunks for this doc/answer (uses retriever.chunks)
+        rel_ids = rel_chunk_ids_by_span_tokens(retriever, doc_id, gold_ans)
+
+        # metrics at different cutoffs (without re-searching)
+        labels_ndcg = labels_for_results(results[:k_ndcg], rel_ids, k_ndcg)
+        labels_rec  = labels_for_results(results[:k_recall], rel_ids, k_recall)
+        labels_hit  = labels_for_results(results[:1],      rel_ids, 1)
+
+        ndcgs.append(ndcg_at_k(labels_ndcg, k_ndcg))
+        recalls.append(1.0 if any(labels_rec) else 0.0)
+        hits.append(1.0 if (labels_hit and labels_hit[0] > 0) else 0.0)
+
+        # Optional: end-to-end (retrieval already done) → build context + answerer
+        if answer_fn is not None and results:
+            ctx_ids = [cid for cid, _ in results[:k_ctx]]
+            passages = [retriever.chunks[cid]["text"] for cid in ctx_ids]
+            metas    = [retriever.chunks[cid]["meta"] for cid in ctx_ids]
+
+            t2 = time.perf_counter()
+            pred, _conf = answer_fn(q, passages, metas)
+            t3 = time.perf_counter()
+            # end-to-end = retrieval + answerer (+ context building)
+            full_ms_all.append((t3 - t0) * 1000.0)
+
+            ems.append(exact_match(pred, gold_ans))
+            f1s.append(token_f1(pred, gold_ans))
+        elif answer_fn is not None:
+            # no results → still track e2e latency for fairness
+            full_ms_all.append((t1 - t0) * 1000.0)
+            ems.append(0.0)
+            f1s.append(0.0)
+
+    out = {
+        f"ndcg@{k_ndcg}": sum(ndcgs) / max(1, len(ndcgs)),
+        f"recall@{k_recall}": sum(recalls) / max(1, len(recalls)),
+        "hit_rate@1": sum(hits) / max(1, len(hits)),
+        "search_p50_ms": _percentile(search_ms_all, 50.0),
+        "search_p95_ms": _percentile(search_ms_all, 95.0),
+    }
+    if answer_fn is not None:
+        out.update({
+            "em": sum(ems) / max(1, len(ems)),
+            "f1": sum(f1s) / max(1, len(f1s)),
+            "full_p50_ms": _percentile(full_ms_all, 50.0),
+            "full_p95_ms": _percentile(full_ms_all, 95.0),
+        })
+    return out

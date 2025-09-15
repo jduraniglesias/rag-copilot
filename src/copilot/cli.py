@@ -1,29 +1,46 @@
 import argparse
+import math
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 # Text & indexing
 from copilot.text.chunk import chunk_text
 from copilot.index.inverted import build_index
 from copilot.index.bm25 import BM25Index
+
+# QA
 from copilot.qa.answering import answer as answer_short
-from copilot.eval.harness import evaluate_qa_with_answerer
 
 # Evaluation harness & metrics
 from copilot.eval.harness import (
     load_gold_jsonl,
     evaluate_retrieval,
     evaluate_qa_baseline,
+    evaluate_qa_with_answerer,
 )
 
-# ---------
-# In-memory "context" (simple module-level cache).
-# In a real service you'd persist indexes to disk; for now, keep it simple.
-# ---------
+# NEW: dense + hybrid imports
+from copilot.index.dense_index import DenseIndex
+from copilot.index import embeddings as E
+from copilot.retrievers.bm25_retriever import BM25Retriever
+from copilot.retrievers.dense_retriever import DenseRetriever
+from copilot.retrievers.hybrid import HybridRetriever
+
+# -----------------------
+# Constants
+# -----------------------
+FAISS_INDEX_PATH = Path("data/index/faiss.index")
+FAISS_META_PATH = Path("data/index/dense_meta.json")
+
+# -----------------------
+# In-memory "context"
+# -----------------------
 _ctx = {
-    "bm25": None,     # BM25Index
-    "docs_dir": None, # Path used to index
+    "bm25": None,         # BM25Index
+    "docs_dir": None,     # Path used to index
     "num_chunks": 0,
+    "dense": None,        # DenseIndex
+    "dense_ready": False, # bool
 }
 
 # -----------------------
@@ -60,7 +77,57 @@ def ensure_bm25_index(documents: str, size: int = 600, overlap: int = 120) -> BM
     _ctx["bm25"] = bm25
     _ctx["docs_dir"] = docs_dir
     _ctx["num_chunks"] = len(chunks)
+    # changing docs invalidates any prior dense cache
+    _ctx["dense"] = None
+    _ctx["dense_ready"] = False
     return bm25
+
+def _chunks_as_ids_texts(chunks):
+    """
+    Return (chunk_ids, chunk_texts) from bm25.chunks whether it's a list or dict.
+    """
+    if isinstance(chunks, dict):
+        ids = sorted(chunks.keys())
+        texts = [chunks[cid]["text"] for cid in ids]
+    else:
+        # assume sequence/list
+        ids = list(range(len(chunks)))
+        texts = [ch["text"] for ch in chunks]
+    return ids, texts
+
+def _ensure_dense_index_from_bm25(bm25: BM25Index, force_rebuild: bool = False) -> DenseIndex:
+    """
+    Ensure a DenseIndex exists on disk and in memory. Builds from bm25.chunks if missing or forced.
+    """
+    global _ctx
+    FAISS_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    need_build = force_rebuild or (not FAISS_INDEX_PATH.exists() or not FAISS_META_PATH.exists())
+    if need_build:
+        chunk_ids, chunk_texts = _chunks_as_ids_texts(bm25.chunks)
+
+        # sanity
+        if not chunk_texts:
+            raise RuntimeError("No chunks available to build dense index.")
+        if any("text" not in bm25.chunks[cid] for cid in (chunk_ids if isinstance(bm25.chunks, dict) else range(len(bm25.chunks)))):
+            raise RuntimeError("Each chunk must have a 'text' field to build dense index.")
+
+        dim = E.get_model().get_sentence_embedding_dimension()
+        dense = DenseIndex(dim, str(FAISS_INDEX_PATH), str(FAISS_META_PATH))
+        dense.build(chunk_texts, chunk_ids)
+        _ctx["dense"] = dense
+        _ctx["dense_ready"] = True
+        return dense
+
+    # load cached
+    if _ctx["dense"] is None or not _ctx["dense_ready"]:
+        dim = E.get_model().get_sentence_embedding_dimension()
+        dense = DenseIndex(dim, str(FAISS_INDEX_PATH), str(FAISS_META_PATH)).load()
+        _ctx["dense"] = dense
+        _ctx["dense_ready"] = True
+        return dense
+
+    return _ctx["dense"]
 
 def _print_search_results(results: List[Tuple[int, float]], bm25: BM25Index, limit: int) -> None:
     """
@@ -88,7 +155,58 @@ def _print_metrics_table(title: str, rows: Dict[str, float]) -> None:
     key_w = max(len(k) for k in rows.keys()) if rows else 0
     for k in sorted(rows.keys()):
         v = rows[k]
-        print(f"{k.ljust(key_w)} : {v:.4f}")
+        # values may be non-floats (e.g., latency strings); handle gracefully
+        try:
+            print(f"{k.ljust(key_w)} : {float(v):.4f}")
+        except Exception:
+            print(f"{k.ljust(key_w)} : {v}")
+
+# -----------------------
+# Retriever wiring
+# -----------------------
+def _build_retriever(
+    mode: str,
+    bm25: BM25Index,
+    hybrid_mode: str = "rrf",
+    alpha: float = 0.6,
+) -> Tuple[object, str]:
+    """
+    Return (retriever_like, label). The returned object has .search(query, k).
+    For non-BM25 modes, we wrap the retriever so evaluation can still access bm25.chunks.
+    """
+    bm25_ret = BM25Retriever(bm25)
+    label = mode.upper()
+
+    if mode == "bm25":
+        return bm25_ret, "BM25"
+
+    # Ensure dense index exists/loaded
+    dense = _ensure_dense_index_from_bm25(bm25, force_rebuild=False)
+    dense_ret = DenseRetriever(dense)
+
+    if mode == "dense":
+        # Wrap to expose bm25 chunks for harness (which expects .chunks)
+        return _BM25Compatible(bm25, dense_ret), "Dense"
+
+    if mode == "hybrid":
+        hy_ret = HybridRetriever(bm25_ret, dense_ret, mode=hybrid_mode, alpha=alpha)
+        return _BM25Compatible(bm25, hy_ret), f"Hybrid-{hybrid_mode.upper()}"
+
+    raise ValueError(f"Unknown retriever mode: {mode}")
+
+class _BM25Compatible:
+    """
+    Minimal adapter so evaluate_* functions that expect an object with:
+      - .search(query, k)
+      - .chunks (to map chunk_id -> text/meta for span checks)
+    keep working for Dense/Hybrid.
+    """
+    def __init__(self, bm25: BM25Index, retriever):
+        self._ret = retriever
+        self.chunks = bm25.chunks
+
+    def search(self, query: str, k: int) -> List[Tuple[int, float]]:
+        return self._ret.search(query, k)
 
 # -----------------------
 # Subcommand handlers
@@ -97,48 +215,88 @@ def cmd_index(args: argparse.Namespace) -> None:
     bm25 = ensure_bm25_index(args.documents, size=args.size, overlap=args.overlap)
     print(f"Indexed {_ctx['num_chunks']} chunks from: {Path(args.documents).resolve()}")
 
+    if args.dense:
+        _ensure_dense_index_from_bm25(bm25, force_rebuild=True)
+        print(f"Dense index built at: {FAISS_INDEX_PATH} (meta: {FAISS_META_PATH})")
+
 def cmd_ask(args: argparse.Namespace) -> None:
     bm25 = ensure_bm25_index(args.documents, size=args.size, overlap=args.overlap)
-    results = bm25.search(args.query, k=args.k)
+    retriever_like, label = _build_retriever(
+        mode=args.retriever,
+        bm25=bm25,
+        hybrid_mode=args.hybrid_mode,
+        alpha=args.alpha,
+    )
+    results = retriever_like.search(args.query, k=args.k)
     if not results:
         print("No results.")
         return
+    print(f"[Retriever: {label}]")
     _print_search_results(results, bm25, limit=args.k)
 
 def cmd_evaluate(args: argparse.Namespace) -> None:
     """
-    Run retrieval + crude QA baseline evaluation on your gold set.
-    (NDCG@k / Recall@k / HitRate@1, plus EM/F1 for top-1 chunk-as-answer.)
+    Side-by-side comparison table for retrieval + QA (+ latency).
     """
+    from copilot.eval.harness import load_gold_jsonl, evaluate_suite
+
     bm25 = ensure_bm25_index(args.documents, size=args.size, overlap=args.overlap)
 
     gold_path = Path(args.gold)
     if not gold_path.exists():
         raise FileNotFoundError(f"Gold file not found: {gold_path}")
-
     gold_items = load_gold_jsonl(str(gold_path))
 
-    # 1) Retrieval metrics (ranking quality)
-    ret = evaluate_retrieval(bm25, gold_items, k=args.k)
-    _print_metrics_table(f"Retrieval (BM25) @k={args.k}", ret)
+    # Which retrievers to run
+    modes = [args.retriever] if args.retriever != "all" else ["bm25", "dense", "hybrid"]
 
-    # 2) QA metrics (short-answer quality)
-    if args.qa == "baseline":
-        qa = evaluate_qa_baseline(bm25, gold_items, k=1)
-        _print_metrics_table("QA baseline (top-1 chunk text)", qa)
-    else:
-        # Import here or at the top of the file—either is fine.
-        from copilot.qa.answering import answer as answer_short
-        from copilot.eval.harness import evaluate_qa_with_answerer
-
-        qa2 = evaluate_qa_with_answerer(
-            bm25,
-            gold_items,
-            k_retrieval=args.k,   # how many to retrieve before building the context
-            k_ctx=args.k_ctx,     # how many top passages to pass to the answerer
-            answer_fn=answer_short,
+    # Collect rows
+    rows = []
+    for mode in modes:
+        r_like, label = _build_retriever(
+            mode=mode,
+            bm25=bm25,
+            hybrid_mode=args.hybrid_mode,
+            alpha=args.alpha,
         )
-        _print_metrics_table("QA (answerer)", qa2)
+        suite = evaluate_suite(
+            r_like,
+            gold_items,
+            k_ndcg=max(10, args.k),   # ensure we have NDCG@10 as requested
+            k_recall=3,               # Recall@3 as requested
+            k_ctx=args.k_ctx,
+            answer_fn=answer_short if args.qa == "answerer" else None,
+        )
+
+        # Decide which latency to display
+        p95_ms = suite.get("full_p95_ms") if args.qa == "answerer" else suite.get("search_p95_ms")
+
+        rows.append({
+            "Retriever": label,
+            "NDCG@10":   suite.get("ndcg@10", 0.0),
+            "Recall@3":  suite.get("recall@3", 0.0),
+            "Hit@1":     suite.get("hit_rate@1", 0.0),
+            "EM":        suite.get("em", float("nan")) if args.qa == "answerer" else float("nan"),
+            "F1":        suite.get("f1", float("nan")) if args.qa == "answerer" else float("nan"),
+            "p95_ms":    p95_ms if p95_ms is not None else float("nan"),
+        })
+
+    # Pretty-print a compact table
+    headers = ["Retriever", "NDCG@10", "Recall@3", "Hit@1", "EM", "F1", "p95_ms"]
+    col_w = {h: max(len(h), max(len(f"{row[h]:.4f}") if isinstance(row[h], float) else len(str(row[h])) for row in rows)) for h in headers}
+    # header
+    line = "  ".join(h.ljust(col_w[h]) for h in headers)
+    print("\n" + line)
+    print("-" * len(line))
+    # rows
+    for row in rows:
+        def fmt(v):
+            if isinstance(v, float):
+                if math.isnan(v):
+                    return "--"
+                return f"{v:.4f}"
+            return str(v)
+        print("  ".join(fmt(row[h]).ljust(col_w[h]) for h in headers))
 
 # -----------------------
 # Main / argparse wiring
@@ -146,7 +304,7 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
 def main():
     parser = argparse.ArgumentParser(
         prog="copilot",
-        description="RAG Copilot CLI (BM25 baseline; evaluate against a gold set).",
+        description="RAG Copilot CLI (BM25 baseline + Dense/Hybrid; evaluate against a gold set).",
     )
     sub = parser.add_subparsers(dest="cmd")
 
@@ -162,13 +320,21 @@ def main():
     # index
     p_idx = sub.add_parser("index", help="Index .txt files in a folder")
     add_common_args(p_idx)
+    p_idx.add_argument("--dense", action="store_true",
+                       help="Also (re)build the FAISS dense index")
     p_idx.set_defaults(func=cmd_index)
 
     # ask
-    p_ask = sub.add_parser("ask", help="Run a BM25 search over the indexed chunks")
+    p_ask = sub.add_parser("ask", help="Run a search over the indexed chunks")
     add_common_args(p_ask)
     p_ask.add_argument("query", type=str, help="Your search query")
     p_ask.add_argument("--k", type=int, default=5, help="Top-k results to return (default: 5)")
+    p_ask.add_argument("--retriever", choices=["bm25", "dense", "hybrid"], default="bm25",
+                       help="Which retriever to use (default: bm25)")
+    p_ask.add_argument("--hybrid-mode", choices=["rrf", "minmax"], default="rrf",
+                       help="Hybrid fusion strategy (default: rrf)")
+    p_ask.add_argument("--alpha", type=float, default=0.6,
+                       help="Weighted-sum blend for hybrid minmax (ignored for rrf)")
     p_ask.set_defaults(func=cmd_ask)
 
     # evaluate
@@ -190,6 +356,12 @@ def main():
         default=3,
         help="How many top chunks to pass to the answerer context."
     )
+    p_eval.add_argument("--retriever", choices=["bm25", "dense", "hybrid", "all"], default="bm25",
+                        help="Choose a retriever to evaluate, or 'all' to compare")
+    p_eval.add_argument("--hybrid-mode", choices=["rrf", "minmax"], default="rrf",
+                        help="Hybrid fusion strategy when retriever=hybrid or all")
+    p_eval.add_argument("--alpha", type=float, default=0.6,
+                        help="Weighted-sum blend for hybrid minmax (ignored for rrf)")
     p_eval.set_defaults(func=cmd_evaluate)
 
     args = parser.parse_args()
