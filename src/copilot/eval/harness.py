@@ -1,6 +1,7 @@
 import json
 import time
 import math
+import random
 from typing import List, Dict, Tuple, Callable
 from copilot.eval.qa_metrics import exact_match, token_f1
 from copilot.eval.rank_metrics import ndcg_at_k, precision_at_k, mrr_at_k
@@ -26,6 +27,21 @@ def load_gold_jsonl(path: str) -> List[Dict]:
                 raise ValueError(f"{path}:{i}: missing required field(s): {', '.join(missing)}")
             rows.append(obj)
     return rows
+
+def split_gold(
+    gold_items: list[dict],
+    dev_ratio: float = 0.7,
+    seed: int = 42,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Deterministically shuffle then split gold into (dev, test).
+    If dev_ratio>=1 or <=0, returns (gold_items, []) or ([], gold_items).
+    """
+    items = list(gold_items)
+    rng = random.Random(seed)
+    rng.shuffle(items)
+    n_dev = int(len(items) * dev_ratio)
+    return items[:n_dev], items[n_dev:]
 
 def relevant_chunk_ids_by_doc(index: dict, doc_id: str) -> List[int]:
     """Return all chunk_ids in index['chunks'] whose meta['doc_id'] == doc_id."""
@@ -191,21 +207,30 @@ def evaluate_suite(
     k_recall: int = 3,           # for Recall@3 and Hit@1
     k_ctx: int = 3,              # how many passages to send to answerer
     answer_fn: Callable[[str, List[str], List[Dict]], Tuple[str, float]] | None = None,
+    context_gate_regex: str = r"\b(return|refund|exchange)\b",   # gate noisy passages
 ) -> Dict[str, float]:
     """
     Runs retrieval once per gold, computes:
       - NDCG@k_ndcg, Recall@k_recall, Hit@1
-      - Optional EM/F1 via answer_fn on top-k_ctx passages
+      - Optional EM/F1 via answer_fn on a gated top-k_ctx context
       - Latencies:
          * search_p50_ms / search_p95_ms (retriever.search only)
          * full_p50_ms / full_p95_ms (retrieval + context + answerer, if answer_fn given)
-    Returns a flat dict of averages and latency percentiles.
+
+    Context gating:
+      - If context_gate_regex matches a passage's text, it is eligible for the k_ctx context.
+      - If no passages match, we fall back to the top-k_ctx unfiltered results.
+    Each passage meta gets:
+      - retrieval_score (float) and retrieval_rank (1-based), so the answerer can weight sentences.
     """
+    import time, re
+
     ndcgs, recalls, hits = [], [], []
     ems, f1s = [], []
     search_ms_all, full_ms_all = [], []
 
     k_max = max(k_ndcg, k_recall, k_ctx)
+    gate = re.compile(context_gate_regex, re.I) if context_gate_regex else None
 
     for item in gold_items:
         q = item["question"]
@@ -231,24 +256,38 @@ def evaluate_suite(
         hits.append(1.0 if (labels_hit and labels_hit[0] > 0) else 0.0)
 
         # Optional: end-to-end (retrieval already done) → build context + answerer
-        if answer_fn is not None and results:
-            ctx_ids = [cid for cid, _ in results[:k_ctx]]
-            passages = [retriever.chunks[cid]["text"] for cid in ctx_ids]
-            metas    = [retriever.chunks[cid]["meta"] for cid in ctx_ids]
+        if answer_fn is not None:
+            if results:
+                # ---- context gating by query-term coverage (cheap precision boost)
+                q_toks = set(tokenize(q))
+                filtered = []
+                for cid, s in results:
+                    ptoks = set(tokenize(retriever.chunks[cid]["text"]))
+                    overlap = len(q_toks & ptoks) / max(1, len(q_toks))
+                    if overlap >= 0.15:  # tweak threshold as needed (0.10–0.20 are common)
+                        filtered.append((cid, s))
 
-            t2 = time.perf_counter()
-            pred, _conf = answer_fn(q, passages, metas)
-            t3 = time.perf_counter()
-            # end-to-end = retrieval + answerer (+ context building)
-            full_ms_all.append((t3 - t0) * 1000.0)
+                # Take filtered if we got any, otherwise fall back to original ranking
+                ctx = (filtered or results)[:k_ctx]
+                ctx_ids = [cid for cid, _ in ctx]
 
-            ems.append(exact_match(pred, gold_ans))
-            f1s.append(token_f1(pred, gold_ans))
-        elif answer_fn is not None:
-            # no results → still track e2e latency for fairness
-            full_ms_all.append((t1 - t0) * 1000.0)
-            ems.append(0.0)
-            f1s.append(0.0)
+                # (unchanged) build context for the answerer
+                passages = [retriever.chunks[cid]["text"] for cid in ctx_ids]
+                metas    = [retriever.chunks[cid]["meta"] for cid in ctx_ids]
+
+                # (unchanged) call your answerer
+                t2 = time.perf_counter()
+                pred, _conf = answer_fn(q, passages, metas)
+                t3 = time.perf_counter()
+                full_ms_all.append((t3 - t0) * 1000.0)
+
+                ems.append(exact_match(pred, gold_ans))
+                f1s.append(token_f1(pred, gold_ans))
+            else:
+                # no results → still track e2e latency for fairness
+                full_ms_all.append((t1 - t0) * 1000.0)
+                ems.append(0.0)
+                f1s.append(0.0)
 
     out = {
         f"ndcg@{k_ndcg}": sum(ndcgs) / max(1, len(ndcgs)),

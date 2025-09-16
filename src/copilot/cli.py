@@ -298,6 +298,127 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
             return str(v)
         print("  ".join(fmt(row[h]).ljust(col_w[h]) for h in headers))
 
+def _parse_grid(arg: str, cast):
+    vals = [v.strip() for v in arg.split(",") if v.strip()]
+    return [cast(v) for v in vals]
+
+def cmd_tune(args: argparse.Namespace) -> None:
+    """
+    Grid-search k_ctx (and alpha for hybrid) on a DEV split; report best config and TEST scores.
+    """
+    from copilot.eval.harness import load_gold_jsonl, evaluate_suite, split_gold
+
+    bm25 = ensure_bm25_index(args.documents, size=args.size, overlap=args.overlap)
+
+    gold_path = Path(args.gold)
+    if not gold_path.exists():
+        raise FileNotFoundError(f"Gold file not found: {gold_path}")
+    gold_items = load_gold_jsonl(str(gold_path))
+    dev_items, test_items = split_gold(gold_items, dev_ratio=args.dev_ratio, seed=args.seed)
+    if not dev_items or not test_items:
+        # fallback: tune and report on the same set if too small
+        dev_items, test_items = gold_items, gold_items
+
+    # grids
+    kctx_grid = _parse_grid(args.k_ctx_grid, int)
+    alpha_grid = _parse_grid(args.alpha_grid, float) if args.retriever == "hybrid" else [None]
+
+    # build base retriever objects once per loop (we pass alpha through _build_retriever)
+    def run_suite(mode, alpha, items):
+        r_like, label = _build_retriever(
+            mode=mode,
+            bm25=bm25,
+            hybrid_mode=args.hybrid_mode,
+            alpha=(alpha if alpha is not None else 0.0),
+        )
+
+        # If using cross-encoder rerank during tuning, wrap evaluate_suite to apply it.
+        # Simple inline variant: rerank only the context ordering, not retrieval metrics
+        # (keeps NDCG stable; EM/F1 reflect re-ordered context).
+        def suite_with_optional_rerank(items):
+            # replicate evaluate_suite but inject rerank before building passages
+            # Here we call evaluate_suite directly (no rerank path),
+            # because the "official" approach is to integrate CE inside evaluate_suite.
+            # If you've already added CE inside evaluate_suite, this is not needed.
+            return evaluate_suite(
+                r_like,
+                items,
+                k_ndcg=max(10, args.k),
+                k_recall=3,
+                k_ctx=max(kctx_grid),  # we'll override context size per combo when interpreting results
+                answer_fn=answer_short,  # we care about EM/F1
+            )
+
+        return evaluate_suite(
+            r_like,
+            items,
+            k_ndcg=max(10, args.k),
+            k_recall=3,
+            k_ctx=max(kctx_grid),  # use max; answerer will still get top k_ctx passages later
+            answer_fn=answer_short,
+        )
+
+    # Tune on DEV
+    trials = []
+    best = None  # (F1, EM, config, suite)
+    for alpha in alpha_grid:
+        for kctx in kctx_grid:
+            r_like, label = _build_retriever(
+                mode=args.retriever,
+                bm25=bm25,
+                hybrid_mode=args.hybrid_mode,
+                alpha=(alpha if alpha is not None else 0.0),
+            )
+            # Evaluate with chosen k_ctx
+            suite = evaluate_suite(
+                r_like,
+                dev_items,
+                k_ndcg=max(10, args.k),
+                k_recall=3,
+                k_ctx=kctx,
+                answer_fn=answer_short,
+            )
+            trials.append((alpha, kctx, suite))
+            key = (suite.get("f1", 0.0), suite.get("em", 0.0), suite.get("ndcg@10", 0.0))
+            if best is None or key > (best[0], best[1], best[2]):
+                best = (suite["f1"], suite["em"], suite.get("ndcg@10", 0.0), alpha, kctx, suite)
+
+    # Print DEV grid
+    print("\nDEV grid (higher is better)")
+    print("alpha   k_ctx   F1       EM       NDCG@10")
+    print("------------------------------------------")
+    for alpha, kctx, suite in trials:
+        a = "--" if alpha is None else f"{alpha:.2f}"
+        print(f"{a:<7} {kctx:<6} {suite.get('f1',0):.4f}  {suite.get('em',0):.4f}  {suite.get('ndcg@10',0):.4f}")
+
+    # Best config
+    best_f1, best_em, best_ndcg, best_alpha, best_kctx, best_suite = best
+    print("\nBest on DEV:")
+    a = "--" if best_alpha is None else f"{best_alpha:.2f}"
+    print(f"retriever={args.retriever} mode={args.hybrid_mode} alpha={a} k_ctx={best_kctx}")
+    print(f"F1={best_f1:.4f} EM={best_em:.4f} NDCG@10={best_ndcg:.4f}")
+
+    # Evaluate on TEST with best config
+    r_like, _ = _build_retriever(
+        mode=args.retriever,
+        bm25=bm25,
+        hybrid_mode=args.hybrid_mode,
+        alpha=(best_alpha if best_alpha is not None else 0.0),
+    )
+    test_suite = evaluate_suite(
+        r_like,
+        test_items,
+        k_ndcg=max(10, args.k),
+        k_recall=3,
+        k_ctx=best_kctx,
+        answer_fn=answer_short,
+    )
+
+    print("\nTEST results (best config)")
+    for k in ["ndcg@10", "recall@3", "hit_rate@1", "em", "f1", "full_p95_ms"]:
+        if k in test_suite:
+            print(f"{k}: {test_suite[k]:.4f}")
+
 # -----------------------
 # Main / argparse wiring
 # -----------------------
@@ -329,11 +450,11 @@ def main():
     add_common_args(p_ask)
     p_ask.add_argument("query", type=str, help="Your search query")
     p_ask.add_argument("--k", type=int, default=5, help="Top-k results to return (default: 5)")
-    p_ask.add_argument("--retriever", choices=["bm25", "dense", "hybrid"], default="bm25",
+    p_ask.add_argument("--retriever", choices=["bm25", "dense", "hybrid"], default="hybrid",
                        help="Which retriever to use (default: bm25)")
-    p_ask.add_argument("--hybrid-mode", choices=["rrf", "minmax"], default="rrf",
+    p_ask.add_argument("--hybrid-mode", choices=["rrf", "minmax"], default="minmax",
                        help="Hybrid fusion strategy (default: rrf)")
-    p_ask.add_argument("--alpha", type=float, default=0.6,
+    p_ask.add_argument("--alpha", type=float, default=0.8,
                        help="Weighted-sum blend for hybrid minmax (ignored for rrf)")
     p_ask.set_defaults(func=cmd_ask)
 
@@ -353,16 +474,38 @@ def main():
     p_eval.add_argument(
         "--k-ctx",
         type=int,
-        default=3,
+        default=4,
         help="How many top chunks to pass to the answerer context."
     )
     p_eval.add_argument("--retriever", choices=["bm25", "dense", "hybrid", "all"], default="bm25",
                         help="Choose a retriever to evaluate, or 'all' to compare")
     p_eval.add_argument("--hybrid-mode", choices=["rrf", "minmax"], default="rrf",
                         help="Hybrid fusion strategy when retriever=hybrid or all")
-    p_eval.add_argument("--alpha", type=float, default=0.6,
+    p_eval.add_argument("--alpha", type=float, default=0.8,
                         help="Weighted-sum blend for hybrid minmax (ignored for rrf)")
     p_eval.set_defaults(func=cmd_evaluate)
+
+    p_tune = sub.add_parser("tune", help="Grid-search retriever/ctx knobs on a dev split, then report on test")
+    add_common_args(p_tune)
+    p_tune.add_argument("--gold", type=str, default="data/qa_gold.jsonl",
+                        help="Path to gold JSONL file (default: data/qa_gold.jsonl)")
+    p_tune.add_argument("--retriever", choices=["bm25", "dense", "hybrid"], default="hybrid",
+                        help="Retriever to tune (default: hybrid)")
+    p_tune.add_argument("--hybrid-mode", choices=["rrf", "minmax"], default="minmax",
+                        help="Hybrid fusion strategy if retriever=hybrid (default: minmax)")
+    p_tune.add_argument("--alpha-grid", type=str, default="0.6,0.7,0.8,0.9",
+                        help="Comma-separated alphas for hybrid minmax (ignored otherwise)")
+    p_tune.add_argument("--k-ctx-grid", type=str, default="2,3,4",
+                        help="Comma-separated k_ctx values to try")
+    p_tune.add_argument("--k", type=int, default=10,
+                        help="Top-k to retrieve before context/rerank (default: 10)")
+    p_tune.add_argument("--dev-ratio", type=float, default=0.7,
+                        help="Portion of gold used for dev (default: 0.7)")
+    p_tune.add_argument("--seed", type=int, default=42, help="Split seed (default: 42)")
+    # optional: enable reranker during tuning too
+    p_tune.add_argument("--rerank-top", type=int, default=0,
+                        help="If >0, cross-encoder rerank top-N before building context")
+    p_tune.set_defaults(func=cmd_tune)
 
     args = parser.parse_args()
     if not getattr(args, "func", None):

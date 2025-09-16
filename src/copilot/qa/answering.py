@@ -175,17 +175,108 @@ def answer(
     """
     Produce a short answer string (and a rough confidence) from top retrieved passages.
 
-    Steps:
-    1) Pick best sentence across passages (biased toward domain phrases / numeric cues).
-    2) Extract a concise span (phrase → regex → keyword window → fallback).
-    3) Canonicalize variants (e.g., "non transferable" -> "non-transferable").
+    Improvements over the basic version:
+      - We weight sentences by the retrieval strength of their parent passage.
+        * retrieval_rank (1 = strongest)  -> w_rank = 1 / rank
+        * retrieval_score (per-query)     -> min-max normalized to [0,1]
+        * passage_weight = 0.5*w_rank + 0.5*w_score (w_score=0 if missing)
+      - Sentence score = (token-F1(question, sentence) + small pattern bonuses) * passage_weight
+      - Then we extract a concise span from the best sentence and normalize it.
     """
     if not passages:
         return "", 0.0
 
-    best_sentence = _pick_best_sentence(question, passages)
+    # --- compute per-passage weights from meta (rank + score) ---
+    def _minmax(xs: List[float]) -> List[float]:
+        if not xs:
+            return []
+        lo = min(xs); hi = max(xs)
+        rng = (hi - lo) or 1e-9
+        return [(x - lo) / rng for x in xs]
+
+    if passages_meta and len(passages_meta) == len(passages):
+        ranks  = [m.get("retrieval_rank") for m in passages_meta]
+        scores = [m.get("retrieval_score") for m in passages_meta]
+
+        w_rank = [1.0 / float(r) if isinstance(r, (int, float)) and r > 0 else 1.0 for r in ranks]
+        # normalize scores if present; else zeros
+        score_vals = [float(s) for s in scores if isinstance(s, (int, float))]
+        if score_vals:
+            norm_map = {i: v for i, v in enumerate(_minmax([float(s) if isinstance(s, (int, float)) else 0.0
+                                                            for s in scores]))}
+            w_score = [norm_map[i] for i in range(len(passages))]
+        else:
+            w_score = [0.0] * len(passages)
+
+        passage_weights = [0.5 * wr + 0.5 * ws for wr, ws in zip(w_rank, w_score)]
+    else:
+        passage_weights = [1.0] * len(passages)
+
+    # --- split passages into sentences and carry the passage weight to each sentence ---
+    splitter = re.compile(r'(?<=[.!?])\s+')
+    sentences: List[str] = []
+    sent_weights: List[float] = []
+    for p, w in zip(passages, passage_weights):
+        for s in splitter.split(p.strip()):
+            s = s.strip()
+            if s:
+                sentences.append(s)
+                sent_weights.append(w)
+
+    if not sentences:
+        # fallback to entire first passage
+        best_sentence = passages[0]
+    else:
+        # --- score sentences: token-F1 + pattern bonuses, then weight by passage strength ---
+        from copilot.eval.qa_metrics import token_f1  # lazy import to avoid cycles
+
+        best_idx, best_score = 0, -1.0
+        for i, s in enumerate(sentences):
+            base = token_f1(s, question)
+
+            # light domain bonuses to help policy Q&A
+            bonus = 0.0
+            if re.search(r'\b\d{1,3}\s*(?:business\s+days|days|weeks|months)\b', s, re.I):
+                bonus += 0.12
+            if re.search(r'\b\d{1,2}%\b', s):
+                bonus += 0.08
+            if re.search(r'\$\s*\d', s):
+                bonus += 0.06
+            if re.search(r'\b(exchang\w+|return\w+|refund\w+)\b', s, re.I):
+                bonus += 0.05
+            if re.search(r'\bwithin\b', s, re.I):
+                bonus += 0.03
+            if re.search(r'\b(delivery|pickup)\b', s, re.I):
+                bonus += 0.02
+
+            score = (base + bonus) * sent_weights[i]
+            if score > best_score:
+                best_score, best_idx = score, i
+
+        best_sentence = sentences[best_idx]
+
+    # --- extract concise span from best sentence (uses your existing extractor) ---
     pred, conf = _extract_span(best_sentence, question)
 
-    # normalize whitespace + lowercase, strip trailing punctuation
+    # --- normalize whitespace + lowercase, strip trailing punctuation ---
     pred = " ".join(pred.strip().split()).lower().rstrip(".,;:!?")
+
+    # lightly modulate confidence by the chosen sentence's passage weight (if available)
+    try:
+        w = sent_weights[best_idx] if sentences else passage_weights[0]
+        w = max(0.0, min(1.0, float(w)))
+        conf = (float(conf) * (0.7 + 0.3 * w)) if conf is not None else w
+    except Exception:
+        pass
+
+    def _is_supported(p: str, ctx: list[str]) -> bool:
+        p = p.strip().lower()
+        if not p:
+            return False
+        return any(p in c.lower() for c in ctx)
+
+    if not _is_supported(pred, passages):
+        # penalize confidence hard (or abstain)
+        conf = (conf * 0.2) if conf is not None else 0.2
+
     return pred, conf

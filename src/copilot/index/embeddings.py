@@ -3,7 +3,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from functools import lru_cache
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # fast, solid cosine
+MODEL_NAME = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
 
 # Uses model to capture phrases/synonyms of words with vectors
 # Embeddings used to turn text to vectors

@@ -11,8 +11,31 @@ python -m copilot.cli index --documents data/documents --dense
 python -m copilot.cli ask "How long do I have to send it back?" --retriever bm25
 python -m copilot.cli ask "How long do I have to send it back?" --retriever dense
 python -m copilot.cli ask "How long do I have to send it back?" --retriever hybrid --hybrid-mode rrf
-python -m copilot.cli ask "How long do I have to send it back?" --retriever hybrid --hybrid-mode minmax --alpha 0.6
+python -m copilot.cli ask "How long do I have to send it back?" --retriever hybrid --hybrid-mode minmax --alpha 0.8
 
 4) Evaluate one vs. all
 python -m copilot.cli evaluate --retriever bm25 --qa answerer --k 5 --k-ctx 3
 python -m copilot.cli evaluate --retriever all  --qa answerer --k 5 --k-ctx 3
+python -m copilot.cli evaluate --retriever hybrid --hybrid-mode minmax --alpha 0.8 --qa answerer --k 10 --k-ctx 3
+
+Copy and Paste:
+python -m copilot.cli index --documents data/documents --dense
+python -m copilot.cli ask "How long do I have to send it back?" --retriever bm25
+python -m copilot.cli ask "How long do I have to send it back?" --retriever dense
+python -m copilot.cli ask "How long do I have to send it back?" --retriever hybrid --hybrid-mode rrf
+python -m copilot.cli ask "How long do I have to send it back?" --retriever hybrid --hybrid-mode minmax --alpha 0.6
+python -m copilot.cli evaluate --retriever hybrid --hybrid-mode minmax --alpha 0.6 --qa answerer --k 10 --k-ctx 3
+
+
+Alpha only applies when using hybrid minmax, changes how much to trust bm25 vs dense evaluation
+Higher values trust bm25 more while lower trust dense more
+
+k_ctx is the context window for the answerer
+It provides the top-k_ctx passages for the window
+So smaller values have less noise but can miss answers if the right chunk isn't at the top
+Larger allows for more chances for answer to be seen but introduces more noise
+
+python -m copilot.cli evaluate --retriever hybrid --hybrid-mode minmax --alpha 0.85 --qa answerer --k 5 --k-ctx 3
+python -m copilot.cli evaluate --retriever hybrid --hybrid-mode minmax --alpha 0.85 --qa answerer --k 5 --k-ctx 2
+python -m copilot.cli evaluate --retriever hybrid --hybrid-mode minmax --alpha 0.85 --qa answerer --k 5 --k-ctx 4
+python -m copilot.cli evaluate --retriever hybrid --hybrid-mode minmax --alpha 0.6 --qa answerer --k 10 --k-ctx 3

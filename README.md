@@ -26,3 +26,6 @@ IDF is the same original scoring for the uniqueness of the query in all the docu
 TF(t, d) in both numerator and denominator used to solve diminishing returns issue
 
 theta = |d| / avgdl, is used to penalize longer documents where |d| is the length of the document so if longer than the avg document length, the larger theta gets which penalizes overall bm25 score
+
+# Flow
+Docs → chunk → BM25 / Dense / Hybrid (top-N) → [CROSS-ENCODER RERANK] → top-k_ctx passages → Answerer → EM/F1
