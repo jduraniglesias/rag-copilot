@@ -227,7 +227,17 @@ def cmd_ask(args: argparse.Namespace) -> None:
         hybrid_mode=args.hybrid_mode,
         alpha=args.alpha,
     )
-    results = retriever_like.search(args.query, k=args.k)
+    base_k = max(args.k, args.rerank_top or 0)
+    results = retriever_like.search(args.query, k=base_k)
+
+    # Optional cross-encoder rerank for top-N
+    if args.rerank_top and results:
+        topN = results[:args.rerank_top]
+        # Use BM25 chunk store for text/metadata
+        passages = [(cid, bm25.chunks[cid]["text"]) for cid, _ in topN]
+        from copilot.rerank.cross_encoder import rerank as ce_rerank
+        results = ce_rerank(args.query, passages, top_m=args.k)
+
     if not results:
         print("No results.")
         return
@@ -262,10 +272,11 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         suite = evaluate_suite(
             r_like,
             gold_items,
-            k_ndcg=max(10, args.k),   # ensure we have NDCG@10 as requested
-            k_recall=3,               # Recall@3 as requested
+            k_ndcg=max(10, args.k),
+            k_recall=3,
             k_ctx=args.k_ctx,
             answer_fn=answer_short if args.qa == "answerer" else None,
+            rerank_top=getattr(args, "rerank_top", 0),
         )
 
         # Decide which latency to display
@@ -456,6 +467,8 @@ def main():
                        help="Hybrid fusion strategy (default: rrf)")
     p_ask.add_argument("--alpha", type=float, default=0.8,
                        help="Weighted-sum blend for hybrid minmax (ignored for rrf)")
+    p_ask.add_argument("--rerank-top", type=int, default=0,
+                   help="If >0, cross-encoder reranks the top-N candidates before printing")
     p_ask.set_defaults(func=cmd_ask)
 
     # evaluate
@@ -483,6 +496,8 @@ def main():
                         help="Hybrid fusion strategy when retriever=hybrid or all")
     p_eval.add_argument("--alpha", type=float, default=0.8,
                         help="Weighted-sum blend for hybrid minmax (ignored for rrf)")
+    p_eval.add_argument("--rerank-top", type=int, default=0,
+                    help="If >0, cross-encoder reranks the top-N before building the answerer context")
     p_eval.set_defaults(func=cmd_evaluate)
 
     p_tune = sub.add_parser("tune", help="Grid-search retriever/ctx knobs on a dev split, then report on test")

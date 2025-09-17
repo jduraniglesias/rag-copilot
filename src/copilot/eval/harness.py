@@ -208,28 +208,42 @@ def evaluate_suite(
     k_ctx: int = 3,              # how many passages to send to answerer
     answer_fn: Callable[[str, List[str], List[Dict]], Tuple[str, float]] | None = None,
     context_gate_regex: str = r"\b(return|refund|exchange)\b",   # gate noisy passages
+    rerank_top: int = 0,
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    rerank_max_length: int = 256,
+    rerank_batch_size: int = 16,
 ) -> Dict[str, float]:
     """
     Runs retrieval once per gold, computes:
       - NDCG@k_ndcg, Recall@k_recall, Hit@1
-      - Optional EM/F1 via answer_fn on a gated top-k_ctx context
+      - Optional EM/F1 via answer_fn on a re-ranked + gated top-k_ctx context
       - Latencies:
          * search_p50_ms / search_p95_ms (retriever.search only)
          * full_p50_ms / full_p95_ms (retrieval + context + answerer, if answer_fn given)
 
     Context gating:
-      - If context_gate_regex matches a passage's text, it is eligible for the k_ctx context.
+      - A passage is eligible if it matches `context_gate_regex` OR passes a token-overlap gate with the question.
       - If no passages match, we fall back to the top-k_ctx unfiltered results.
+
     Each passage meta gets:
       - retrieval_score (float) and retrieval_rank (1-based), so the answerer can weight sentences.
+
+    Reranking:
+      - If rerank_top > 0, we apply a cross-encoder to the top-N retrieved items *for context only*.
+        Retrieval metrics are computed on the original ranking.
     """
     import time, re
+
+    OVERLAP_THRESHOLD = 0.15  # token-overlap gate (fraction of q tokens present in passage)
 
     ndcgs, recalls, hits = [], [], []
     ems, f1s = [], []
     search_ms_all, full_ms_all = [], []
 
+    # We may need more than k_max if reranking the top-N for context
     k_max = max(k_ndcg, k_recall, k_ctx)
+    base_k = max(k_max, rerank_top or 0)
+
     gate = re.compile(context_gate_regex, re.I) if context_gate_regex else None
 
     for item in gold_items:
@@ -239,7 +253,7 @@ def evaluate_suite(
 
         # ---- time retrieval only
         t0 = time.perf_counter()
-        results = retriever.search(q, k=k_max)
+        results = retriever.search(q, k=base_k)
         t1 = time.perf_counter()
         search_ms_all.append((t1 - t0) * 1000.0)
 
@@ -258,24 +272,57 @@ def evaluate_suite(
         # Optional: end-to-end (retrieval already done) → build context + answerer
         if answer_fn is not None:
             if results:
-                # ---- context gating by query-term coverage (cheap precision boost)
+                ranked_for_ctx = results
+
+                # ---- (B) Context-only cross-encoder rerank (preserves retrieval metrics above)
+                if rerank_top and rerank_top > 0:
+                    topN = results[:min(rerank_top, len(results))]
+                    passagesN = [(cid, retriever.chunks[cid]["text"]) for cid, _ in topN]
+                    try:
+                        from copilot.rerank.cross_encoder import rerank as ce_rerank
+                        ce_sorted = ce_rerank(
+                            q, passagesN, top_m=len(topN),
+                            model_name=rerank_model,
+                            max_length=rerank_max_length,
+                            batch_size=rerank_batch_size,
+                        )
+                        ce_ids = [cid for cid, _ in ce_sorted]
+                        ce_idset = set(ce_ids)
+                        # keep CE order first, then append the rest (still in original order)
+                        rest = [pair for pair in results if pair[0] not in ce_idset]
+                        ranked_for_ctx = ce_sorted + rest
+                    except Exception:
+                        # Fail-safe: if CE fails, fall back to original ranking
+                        ranked_for_ctx = results
+
+                # ---- context gating by query-term coverage + regex
                 q_toks = set(tokenize(q))
                 filtered = []
-                for cid, s in results:
-                    ptoks = set(tokenize(retriever.chunks[cid]["text"]))
-                    overlap = len(q_toks & ptoks) / max(1, len(q_toks))
-                    if overlap >= 0.15:  # tweak threshold as needed (0.10–0.20 are common)
+                for cid, s in ranked_for_ctx:
+                    text = retriever.chunks[cid]["text"]
+                    # token-overlap gate
+                    ptoks = set(tokenize(text))
+                    overlap_ok = (len(q_toks & ptoks) / max(1, len(q_toks))) >= OVERLAP_THRESHOLD
+                    # regex gate
+                    regex_ok = bool(gate.search(text)) if gate else False
+                    if overlap_ok or regex_ok:
                         filtered.append((cid, s))
 
-                # Take filtered if we got any, otherwise fall back to original ranking
-                ctx = (filtered or results)[:k_ctx]
-                ctx_ids = [cid for cid, _ in ctx]
+                # Take filtered if we got any, otherwise fall back to ranked_for_ctx
+                ctx_pairs = (filtered or ranked_for_ctx)[:k_ctx]
+                ctx_ids = [cid for cid, _ in ctx_pairs]
 
-                # (unchanged) build context for the answerer
-                passages = [retriever.chunks[cid]["text"] for cid in ctx_ids]
-                metas    = [retriever.chunks[cid]["meta"] for cid in ctx_ids]
+                # build context for the answerer and inject retrieval_rank/score
+                passages: List[str] = []
+                metas: List[Dict] = []
+                for rank_idx, (cid, s) in enumerate(ctx_pairs, start=1):
+                    passages.append(retriever.chunks[cid]["text"])
+                    m = dict(retriever.chunks[cid]["meta"])
+                    m["retrieval_score"] = float(s)
+                    m["retrieval_rank"] = rank_idx
+                    metas.append(m)
 
-                # (unchanged) call your answerer
+                # call your answerer
                 t2 = time.perf_counter()
                 pred, _conf = answer_fn(q, passages, metas)
                 t3 = time.perf_counter()
@@ -304,3 +351,4 @@ def evaluate_suite(
             "full_p95_ms": _percentile(full_ms_all, 95.0),
         })
     return out
+
