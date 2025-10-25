@@ -1,0 +1,25 @@
+{
+  "cfg": {
+    "documents": "data/documents",
+    "gold": "data/qa_gold.jsonl",
+    "retriever": "hybrid",
+    "hybrid_mode": "minmax",
+    "alpha": 0.8,
+    "k": 10,
+    "k_ctx": 3,
+    "rerank_top": 20
+  },
+  "metrics": {
+    "ndcg@10": 0.9384355378153374,
+    "recall@3": 0.96,
+    "hit_rate@1": 0.88,
+    "search_p50_ms": 9.21040000002904,
+    "search_p95_ms": 10.873540000011415,
+    "em": 0.44,
+    "f1": 0.547030303030303,
+    "supported_rate": 1.0,
+    "full_p50_ms": 48.23850000002494,
+    "full_p95_ms": 55.78295999994224,
+    "retriever": "Hybrid-MINMAX"
+  }
+}

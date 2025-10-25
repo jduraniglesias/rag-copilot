@@ -7,6 +7,9 @@ from typing import List, Dict, Tuple, Optional
 from copilot.text.chunk import chunk_text
 from copilot.index.inverted import build_index
 from copilot.index.bm25 import BM25Index
+from copilot.index.persist import load_bm25, save_bm25
+from copilot.text.pdf_html import ingest_pdf, ingest_html
+from copilot.eval.runlog import log_run
 
 # QA
 from copilot.qa.answering import answer as answer_short
@@ -31,6 +34,7 @@ from copilot.retrievers.hybrid import HybridRetriever
 # -----------------------
 FAISS_INDEX_PATH = Path("data/index/faiss.index")
 FAISS_META_PATH = Path("data/index/dense_meta.json")
+BM25_PERSIST_PATH = Path("data/index/bm25.json.gz")
 
 # -----------------------
 # In-memory "context"
@@ -47,39 +51,50 @@ _ctx = {
 # Utilities
 # -----------------------
 def load_documents(dir_path: Path, size: int = 600, overlap: int = 120) -> List[Dict]:
-    """
-    Load .txt files from a folder and return a list of chunks.
-    (chunk = slice of a larger doc; overlap = how much each chunk shares with the next)
-    """
     chunks: List[Dict] = []
-    txt_files = sorted(dir_path.glob("*.txt"))
-    for p in txt_files:
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        chunks.extend(chunk_text(text, doc_id=p.name, size=size, overlap=overlap))
+    files = sorted(
+        [*dir_path.glob("*.txt"), *dir_path.glob("*.pdf"), *dir_path.glob("*.html"), *dir_path.glob("*.htm")]
+    )
+    for p in files:
+        suf = p.suffix.lower()
+        if suf == ".txt":
+            text = p.read_text(encoding="utf-8", errors="ignore")
+            chunks.extend(chunk_text(text, doc_id=p.name, size=size, overlap=overlap))
+        elif suf == ".pdf":
+            chunks.extend(ingest_pdf(str(p), size=size, overlap=overlap))
+        elif suf in (".html", ".htm"):
+            chunks.extend(ingest_html(str(p), size=size, overlap=overlap))
     return chunks
 
 def ensure_bm25_index(documents: str, size: int = 600, overlap: int = 120) -> BM25Index:
-    """
-    Ensure we have a BM25 index in memory; (re)build if the documents path changed.
-    """
     global _ctx
     docs_dir = Path(documents)
+
+    # reuse if already loaded for same docs dir
     if _ctx["bm25"] is not None and _ctx["docs_dir"] == docs_dir:
         return _ctx["bm25"]
 
+    # try load persisted
+    if BM25_PERSIST_PATH.exists():
+        bm25 = load_bm25(str(BM25_PERSIST_PATH))
+        _ctx["bm25"] = bm25
+        _ctx["docs_dir"] = docs_dir
+        _ctx["num_chunks"] = len(bm25.chunks)
+        return bm25
+
+    # else build fresh
     if not docs_dir.exists() or not docs_dir.is_dir():
         raise FileNotFoundError(f"Documents directory not found: {docs_dir}")
-
     chunks = load_documents(docs_dir, size=size, overlap=overlap)
     index = build_index(chunks)
-    bm25 = BM25Index(index)
-
+    bm25 = BM25Index(index, k1=1.5, b=0.75)  # use better default b
     _ctx["bm25"] = bm25
     _ctx["docs_dir"] = docs_dir
     _ctx["num_chunks"] = len(chunks)
-    # changing docs invalidates any prior dense cache
-    _ctx["dense"] = None
-    _ctx["dense_ready"] = False
+
+    # persist
+    BM25_PERSIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    save_bm25(bm25, str(BM25_PERSIST_PATH))
     return bm25
 
 def _chunks_as_ids_texts(chunks):
@@ -279,6 +294,9 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
             rerank_top=getattr(args, "rerank_top", 0),
         )
 
+        cfg = {k: v for k, v in vars(args).items() if k != "func"}
+        log_run(config=cfg, metrics=suite)
+
         # Decide which latency to display
         p95_ms = suite.get("full_p95_ms") if args.qa == "answerer" else suite.get("search_p95_ms")
 
@@ -460,44 +478,57 @@ def main():
     p_ask = sub.add_parser("ask", help="Run a search over the indexed chunks")
     add_common_args(p_ask)
     p_ask.add_argument("query", type=str, help="Your search query")
-    p_ask.add_argument("--k", type=int, default=5, help="Top-k results to return (default: 5)")
-    p_ask.add_argument("--retriever", choices=["bm25", "dense", "hybrid"], default="hybrid",
-                       help="Which retriever to use (default: bm25)")
-    p_ask.add_argument("--hybrid-mode", choices=["rrf", "minmax"], default="minmax",
-                       help="Hybrid fusion strategy (default: rrf)")
-    p_ask.add_argument("--alpha", type=float, default=0.8,
-                       help="Weighted-sum blend for hybrid minmax (ignored for rrf)")
-    p_ask.add_argument("--rerank-top", type=int, default=0,
-                   help="If >0, cross-encoder reranks the top-N candidates before printing")
+    p_ask.add_argument("--k", type=int, default=10, help="Top-k results to return (default: 10)")
+    p_ask.add_argument(
+        "--retriever", choices=["bm25", "dense", "hybrid"], default="hybrid",
+        help="Which retriever to use (default: hybrid)"
+    )
+    p_ask.add_argument(
+        "--hybrid-mode", choices=["rrf", "minmax"], default="minmax",
+        help="Hybrid fusion strategy (default: minmax)"
+    )
+    p_ask.add_argument(
+        "--alpha", type=float, default=0.8,
+        help="BM25 weight for hybrid minmax (ignored for rrf). Higher = more BM25 (default: 0.8)"
+    )
+    p_ask.add_argument(
+        "--rerank-top", type=int, default=0,
+        help="If >0, cross-encoder reranks the top-N candidates before printing (context only)"
+    )
     p_ask.set_defaults(func=cmd_ask)
 
     # evaluate
     p_eval = sub.add_parser("evaluate", help="Evaluate retrieval and QA metrics on a gold set")
     add_common_args(p_eval)
-    p_eval.add_argument("--gold", type=str, default="data/qa_gold.jsonl",
-                        help="Path to gold JSONL file (default: data/qa_gold.jsonl)")
-    p_eval.add_argument("--k", type=int, default=5, help="Top-k for retrieval metrics (default: 5)")
     p_eval.add_argument(
-        "--qa",
-        type=str,
-        choices=["baseline", "answerer"],
-        default="baseline",
-        help="QA scoring mode: 'baseline' uses top-1 chunk text; 'answerer' uses your extractor."
+        "--gold", type=str, default="data/qa_gold.jsonl",
+        help="Path to gold JSONL file (default: data/qa_gold.jsonl)"
+    )
+    p_eval.add_argument("--k", type=int, default=10, help="Top-k to retrieve before context (default: 10)")
+    p_eval.add_argument(
+        "--qa", type=str, choices=["baseline", "answerer"], default="baseline",
+        help="QA scoring mode: 'baseline' uses top-1 chunk text; 'answerer' uses your extractor"
     )
     p_eval.add_argument(
-        "--k-ctx",
-        type=int,
-        default=4,
-        help="How many top chunks to pass to the answerer context."
+        "--k-ctx", type=int, default=3,
+        help="How many top chunks to pass to the answerer context (default: 3)"
     )
-    p_eval.add_argument("--retriever", choices=["bm25", "dense", "hybrid", "all"], default="bm25",
-                        help="Choose a retriever to evaluate, or 'all' to compare")
-    p_eval.add_argument("--hybrid-mode", choices=["rrf", "minmax"], default="rrf",
-                        help="Hybrid fusion strategy when retriever=hybrid or all")
-    p_eval.add_argument("--alpha", type=float, default=0.8,
-                        help="Weighted-sum blend for hybrid minmax (ignored for rrf)")
-    p_eval.add_argument("--rerank-top", type=int, default=0,
-                    help="If >0, cross-encoder reranks the top-N before building the answerer context")
+    p_eval.add_argument(
+        "--retriever", choices=["bm25", "dense", "hybrid", "all"], default="hybrid",
+        help="Choose a retriever to evaluate, or 'all' to compare (default: hybrid)"
+    )
+    p_eval.add_argument(
+        "--hybrid-mode", choices=["rrf", "minmax"], default="minmax",
+        help="Hybrid fusion strategy when retriever=hybrid or all (default: minmax)"
+    )
+    p_eval.add_argument(
+        "--alpha", type=float, default=0.8,
+        help="BM25 weight for hybrid minmax (ignored for rrf). Higher = more BM25 (default: 0.8)"
+    )
+    p_eval.add_argument(
+        "--rerank-top", type=int, default=0,
+        help="If >0, cross-encoder reranks the top-N before building the answerer context (context only)"
+    )
     p_eval.set_defaults(func=cmd_evaluate)
 
     p_tune = sub.add_parser("tune", help="Grid-search retriever/ctx knobs on a dev split, then report on test")

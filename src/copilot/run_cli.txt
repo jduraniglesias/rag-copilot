@@ -23,8 +23,8 @@ python -m copilot.cli index --documents data/documents --dense
 python -m copilot.cli ask "How long do I have to send it back?" --retriever bm25
 python -m copilot.cli ask "How long do I have to send it back?" --retriever dense
 python -m copilot.cli ask "How long do I have to send it back?" --retriever hybrid --hybrid-mode rrf
-python -m copilot.cli ask "How long do I have to send it back?" --retriever hybrid --hybrid-mode minmax --alpha 0.6
-python -m copilot.cli evaluate --retriever hybrid --hybrid-mode minmax --alpha 0.6 --qa answerer --k 10 --k-ctx 3
+python -m copilot.cli ask "How long do I have to send it back?" --retriever hybrid --hybrid-mode minmax --alpha 0.8
+python -m copilot.cli evaluate --retriever hybrid --hybrid-mode minmax --alpha 0.8 --qa answerer --k 10 --k-ctx 3
 
 
 Alpha only applies when using hybrid minmax, changes how much to trust bm25 vs dense evaluation

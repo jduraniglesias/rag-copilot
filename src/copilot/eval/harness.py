@@ -237,6 +237,7 @@ def evaluate_suite(
     OVERLAP_THRESHOLD = 0.15  # token-overlap gate (fraction of q tokens present in passage)
 
     ndcgs, recalls, hits = [], [], []
+    supported = []
     ems, f1s = [], []
     search_ms_all, full_ms_all = [], []
 
@@ -330,6 +331,8 @@ def evaluate_suite(
 
                 ems.append(exact_match(pred, gold_ans))
                 f1s.append(token_f1(pred, gold_ans))
+                p = (pred or "").strip().lower()
+                supported.append(1.0 if p and any(p in psg.lower() for psg in passages) else 0.0)
             else:
                 # no results → still track e2e latency for fairness
                 full_ms_all.append((t1 - t0) * 1000.0)
@@ -347,6 +350,7 @@ def evaluate_suite(
         out.update({
             "em": sum(ems) / max(1, len(ems)),
             "f1": sum(f1s) / max(1, len(f1s)),
+            "supported_rate": sum(supported) / max(1, len(supported)),  # NEW
             "full_p50_ms": _percentile(full_ms_all, 50.0),
             "full_p95_ms": _percentile(full_ms_all, 95.0),
         })

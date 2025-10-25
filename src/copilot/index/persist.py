@@ -1,8 +1,9 @@
+from __future__ import annotations
 import json, gzip
-from typing import Any, Dict
+from typing import Dict, Any
 from copilot.index.bm25 import BM25Index
 
-def save_bm25(bm25: BM25Index, path: str = "data/index/bm25.json.gz"):
+def save_bm25(bm25: BM25Index, path: str = "data/index/bm25.json.gz") -> None:
     obj = {
         "postings": bm25.postings,
         "doc_len": bm25.doc_len,
@@ -18,4 +19,4 @@ def save_bm25(bm25: BM25Index, path: str = "data/index/bm25.json.gz"):
 def load_bm25(path: str = "data/index/bm25.json.gz") -> BM25Index:
     with gzip.open(path, "rt", encoding="utf-8") as f:
         obj = json.load(f)
-    return BM25Index(obj, k1=obj.get("k1", 1.5), b=obj.get("b", 0.75))
+    return BM25Index(obj, k1=float(obj.get("k1", 1.5)), b=float(obj.get("b", 0.75)))
