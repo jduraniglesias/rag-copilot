@@ -2,3 +2,14 @@ pytest
 tdm
 regex
 sentence-transformers
+numpy>=1.24
+pandas>=2.0
+faiss-cpu>=1.7.4
+transformers>=4.40.0
+torch>=2.1.0
+fastapi>=0.110
+uvicorn[standard]>=0.24
+python-multipart>=0.0.9
+pypdf>=4.0.0
+beautifulsoup4>=4.12
+lxml>=4.9
